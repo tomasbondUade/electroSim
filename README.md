@@ -12,7 +12,7 @@ App de escritorio para monitorear en tiempo real los motores de los robots Unitr
 ## Instalación
 
 ### 1. Clonar el repositorio
-git clone https://github.com/TU_USUARIO/electroSim.git
+git clone https://github.com/tomasbondUade/electroSim.git
 cd electroSim
 
 ### 2. Crear entorno virtual e instalar dependencias

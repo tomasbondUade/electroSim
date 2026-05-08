@@ -4,6 +4,7 @@ Interfaz gráfica principal — Monitor de motores Unitree.
 
 import csv
 import subprocess
+import platform
 import time
 from datetime import datetime
 from PyQt6.QtWidgets import (
@@ -75,6 +76,10 @@ class MotorMonitorWindow(QMainWindow):
         self.btn_disconnect.clicked.connect(self._on_disconnect)
         self.btn_disconnect.setEnabled(False)
         conn_layout.addWidget(self.btn_disconnect)
+
+        self.btn_demo = QPushButton("Modo Demo")
+        self.btn_demo.clicked.connect(self._on_demo)
+        conn_layout.addWidget(self.btn_demo)
 
         conn_layout.addStretch()
         layout.addWidget(conn_group)
@@ -182,22 +187,60 @@ class MotorMonitorWindow(QMainWindow):
     # ── Interfaces de red ──
 
     def _populate_interfaces(self):
+        """Detecta interfaces de red activas y las muestra en el combo."""
         self.combo_iface.clear()
         try:
-            result = subprocess.run(
-                ["ip", "-o", "link", "show"],
-                capture_output=True, text=True, timeout=5,
-            )
-            for line in result.stdout.strip().split("\n"):
-                parts = line.split(": ")
-                if len(parts) >= 2:
-                    name = parts[1].split("@")[0]
-                    if name != "lo":
-                        self.combo_iface.addItem(name)
+            if platform.system() == "Windows":
+                result = subprocess.run(
+                    ["ipconfig"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                current_name = None
+                for line in result.stdout.split("\n"):
+                    line = line.strip()
+                    if line.endswith(":") and "adapter" in line.lower():
+                        current_name = line.replace(":", "").strip()
+                        # Limpiar prefijo "Ethernet adapter" / "Wireless LAN adapter"
+                        for prefix in ["Ethernet adapter ", "Wireless LAN adapter ",
+                                       "Adaptador de Ethernet ", "Adaptador de LAN inalámbrica "]:
+                            if current_name.startswith(prefix):
+                                current_name = current_name[len(prefix):]
+                    elif current_name and ("IPv4" in line or "Dirección IPv4" in line):
+                        self.combo_iface.addItem(current_name)
+                        current_name = None
+            else:
+                result = subprocess.run(
+                    ["ip", "-o", "link", "show"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                for line in result.stdout.strip().split("\n"):
+                    parts = line.split(": ")
+                    if len(parts) >= 2:
+                        name = parts[1].split("@")[0]
+                        if name != "lo":
+                            self.combo_iface.addItem(name)
         except Exception:
             self.combo_iface.addItem("eth0")
 
+        if self.combo_iface.count() == 0:
+            self.combo_iface.addItem("No se detectaron interfaces")
+
     # ── Conexión / Desconexión ──
+
+    def _on_demo(self):
+        """Inicia la app con datos simulados para probar sin robot."""
+        robot = self.combo_robot.currentText().lower()
+        self.status.showMessage(f"Modo demo — {robot.upper()} simulado")
+        self.btn_connect.setEnabled(False)
+        self.btn_demo.setEnabled(False)
+
+        self._setup_table(robot)
+
+        self.reader = DDSReader(robot, "", demo_mode=True)
+        self.reader.data_received.connect(self._on_data)
+        self.reader.error_occurred.connect(self._on_error)
+        self.reader.connected.connect(self._on_connected)
+        self.reader.start()
 
     def _on_connect(self):
         robot = self.combo_robot.currentText().lower()
@@ -232,6 +275,7 @@ class MotorMonitorWindow(QMainWindow):
             self.reader = None
 
         self.btn_connect.setEnabled(True)
+        self.btn_demo.setEnabled(True)
         self.btn_disconnect.setEnabled(False)
         self.btn_snapshot.setEnabled(False)
         self.combo_robot.setEnabled(True)
@@ -240,6 +284,7 @@ class MotorMonitorWindow(QMainWindow):
 
     def _on_error(self, msg):
         self.btn_connect.setEnabled(True)
+        self.btn_demo.setEnabled(True)
         self.status.showMessage(f"Error: {msg}")
         QMessageBox.critical(self, "Error de conexión", msg)
 

@@ -5,23 +5,20 @@ echo   Unitree Motor Monitor - Generar .exe
 echo ============================================
 echo.
 
-REM Verificar que existe el entorno virtual
-if not exist env\Scripts\activate.bat (
-    echo [ERROR] No se encontro el entorno virtual.
-    echo Ejecuta primero: python -m venv env
-    echo Luego: env\Scripts\pip install -r requirements.txt
+REM Verificar que existe env310 (Python 3.10 + cyclonedds 0.10.2)
+if not exist env310\Scripts\activate.bat (
+    echo [ERROR] No se encontro el entorno virtual env310.
+    echo Ejecuta primero:
+    echo   py -3.10 -m venv env310
+    echo   env310\Scripts\pip install PyQt6 pyqtgraph openpyxl pyinstaller
+    echo   env310\Scripts\pip install --only-binary=:all: cyclonedds==0.10.2
+    echo   env310\Scripts\pip install -e unitree_sdk2_python --no-deps
     pause
     exit /b 1
 )
 
-call env\Scripts\activate.bat
-echo [OK] Entorno virtual activado
-echo.
-
-REM Asegurar que pyqtgraph este instalado
-echo [1/3] Verificando dependencias...
-python -m pip install --quiet pyqtgraph pyinstaller
-echo [OK] Dependencias OK
+call env310\Scripts\activate.bat
+echo [OK] Entorno env310 activado (Python 3.10 + cyclonedds 0.10.2)
 echo.
 
 REM Limpiar build anterior
@@ -30,7 +27,7 @@ if exist dist   rmdir /s /q dist
 if exist UnitreeMotorMonitor.spec del UnitreeMotorMonitor.spec
 
 REM Generar .exe
-echo [2/3] Generando ejecutable (puede tardar unos minutos)...
+echo [1/2] Generando ejecutable (puede tardar unos minutos)...
 echo.
 
 pyinstaller ^
@@ -38,6 +35,8 @@ pyinstaller ^
     --windowed ^
     --name "UnitreeMotorMonitor" ^
     --collect-all pyqtgraph ^
+    --collect-all cyclonedds ^
+    --collect-all unitree_sdk2py ^
     --hidden-import PyQt6.QtCore ^
     --hidden-import PyQt6.QtGui ^
     --hidden-import PyQt6.QtWidgets ^
@@ -52,12 +51,18 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [3/3] Verificando...
+echo [2/2] Verificando...
 if exist dist\UnitreeMotorMonitor.exe (
     echo ============================================
     echo   LISTO! Ejecutable generado en:
     echo.
     echo   dist\UnitreeMotorMonitor.exe
+    echo.
+    echo   IMPORTANTE: cada PC que use el .exe con robot
+    echo   real necesita configurar IP estatica en Ethernet:
+    echo     IP:      192.168.123.100
+    echo     Mascara: 255.255.255.0
+    echo   (requiere ejecutar como administrador una vez)
     echo ============================================
 ) else (
     echo [ERROR] No se encontro el .exe en dist\

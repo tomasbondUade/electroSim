@@ -62,18 +62,22 @@ def _joint_tooltip(motor_name: str) -> str:
 # ── GraphPanel ─────────────────────────────────────────────────────────────────
 
 class GraphPanel(QWidget):
-    """Gráficos en tiempo real: ángulos por grupo + temperatura de todos los motores."""
+    """Gráficos en tiempo real: ángulos, temperatura, corriente y tensión del sistema."""
 
     HISTORY = 300  # muestras (30 s a 10 Hz)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._time_start  = None
-        self._times       = deque(maxlen=self.HISTORY)
-        self._motor_data  = {}   # idx -> {"q_deg": deque, "temperature": deque}
-        self._motor_info  = {}   # idx -> {name, group}
-        self._angle_curves = {}  # idx -> PlotDataItem
-        self._temp_curves  = {}  # idx -> PlotDataItem
+        self._time_start   = None
+        self._times        = deque(maxlen=self.HISTORY)
+        self._motor_data   = {}   # idx -> {"q_deg": deque, "temperature": deque}
+        self._motor_info   = {}   # idx -> {name, group}
+        self._angle_curves = {}   # idx -> PlotDataItem
+        self._temp_curves  = {}   # idx -> PlotDataItem
+        self._power_a_buf  = deque(maxlen=self.HISTORY)
+        self._power_v_buf  = deque(maxlen=self.HISTORY)
+        self._curve_current = None
+        self._curve_voltage = None
         self._build_ui()
 
     def _build_ui(self):
@@ -89,21 +93,40 @@ class GraphPanel(QWidget):
         ctrl.addStretch()
         layout.addLayout(ctrl)
 
-        row = QHBoxLayout()
+        grid = QGridLayout()
+        grid.setSpacing(6)
 
+        # Fila 0 — Ángulos | Temperatura
         self.plot_angle = pg.PlotWidget(title="Ángulo por motor (°)")
-        self.plot_angle.setLabel("left",   "Ángulo",      units="°")
-        self.plot_angle.setLabel("bottom", "Tiempo",      units="s")
+        self.plot_angle.setLabel("left",   "Ángulo",     units="°")
+        self.plot_angle.setLabel("bottom", "Tiempo",     units="s")
         self.plot_angle.showGrid(x=True, y=True, alpha=0.3)
-        row.addWidget(self.plot_angle)
+        grid.addWidget(self.plot_angle, 0, 0)
 
         self.plot_temp = pg.PlotWidget(title="Temperatura — todos los motores (°C)")
-        self.plot_temp.setLabel("left",   "Temperatura",  units="°C")
-        self.plot_temp.setLabel("bottom", "Tiempo",       units="s")
+        self.plot_temp.setLabel("left",   "Temperatura", units="°C")
+        self.plot_temp.setLabel("bottom", "Tiempo",      units="s")
         self.plot_temp.showGrid(x=True, y=True, alpha=0.3)
-        row.addWidget(self.plot_temp)
+        grid.addWidget(self.plot_temp, 0, 1)
 
-        layout.addLayout(row)
+        # Fila 1 — Corriente | Tensión
+        self.plot_current = pg.PlotWidget(
+            title="Corriente del sistema (A) — picos = esfuerzo mecánico"
+        )
+        self.plot_current.setLabel("left",   "Corriente", units="A")
+        self.plot_current.setLabel("bottom", "Tiempo",    units="s")
+        self.plot_current.showGrid(x=True, y=True, alpha=0.3)
+        grid.addWidget(self.plot_current, 1, 0)
+
+        self.plot_voltage = pg.PlotWidget(
+            title="Tensión del sistema (V) — caídas = alta demanda"
+        )
+        self.plot_voltage.setLabel("left",   "Tensión",  units="V")
+        self.plot_voltage.setLabel("bottom", "Tiempo",   units="s")
+        self.plot_voltage.showGrid(x=True, y=True, alpha=0.3)
+        grid.addWidget(self.plot_voltage, 1, 1)
+
+        layout.addLayout(grid)
 
     def setup_motors(self, robot_type: str):
         """Inicializa buffers y curvas para el robot conectado."""
@@ -116,6 +139,8 @@ class GraphPanel(QWidget):
         self._time_start = None
         self._angle_curves.clear()
         self._temp_curves.clear()
+        self._power_a_buf.clear()
+        self._power_v_buf.clear()
 
         groups = []
         for idx in range(num):
@@ -146,6 +171,27 @@ class GraphPanel(QWidget):
                 name=self._motor_info[idx]["name"],
             )
             self._temp_curves[idx] = curve
+
+        # Corriente y tensión del sistema
+        self.plot_current.clear()
+        self._curve_current = self.plot_current.plot(
+            pen=pg.mkPen("#1e88e5", width=2), name="Corriente (A)"
+        )
+        # Línea de referencia: consumo en reposo ~1.5 A
+        self.plot_current.addLine(
+            y=1.5, pen=pg.mkPen(color=(150, 150, 150), width=1,
+                                style=Qt.PenStyle.DashLine)
+        )
+
+        self.plot_voltage.clear()
+        self._curve_voltage = self.plot_voltage.plot(
+            pen=pg.mkPen("#e53935", width=2), name="Tensión (V)"
+        )
+        # Línea de referencia: tensión nominal Go2 ~27.5 V
+        self.plot_voltage.addLine(
+            y=27.5, pen=pg.mkPen(color=(150, 150, 150), width=1,
+                                 style=Qt.PenStyle.DashLine)
+        )
 
         # Ángulo: combo de grupos
         self.combo_group.blockSignals(True)
@@ -191,6 +237,9 @@ class GraphPanel(QWidget):
                 self._motor_data[idx]["q_deg"].append(motor["q_deg"])
                 self._motor_data[idx]["temperature"].append(motor["temperature"])
 
+        self._power_a_buf.append(packet["power_a"])
+        self._power_v_buf.append(packet["power_v"])
+
         t_arr = list(self._times)
 
         for idx, curve in self._angle_curves.items():
@@ -205,9 +254,23 @@ class GraphPanel(QWidget):
             if n > 0:
                 curve.setData(t_arr[-n:], data[-n:])
 
+        if self._curve_current is not None:
+            data_a = list(self._power_a_buf)
+            n = min(len(t_arr), len(data_a))
+            if n > 0:
+                self._curve_current.setData(t_arr[-n:], data_a[-n:])
+
+        if self._curve_voltage is not None:
+            data_v = list(self._power_v_buf)
+            n = min(len(t_arr), len(data_v))
+            if n > 0:
+                self._curve_voltage.setData(t_arr[-n:], data_v[-n:])
+
     def clear(self):
         self._time_start = None
         self._times.clear()
+        self._power_a_buf.clear()
+        self._power_v_buf.clear()
         for buf in self._motor_data.values():
             buf["q_deg"].clear()
             buf["temperature"].clear()
@@ -215,6 +278,10 @@ class GraphPanel(QWidget):
             curve.setData([], [])
         for curve in self._temp_curves.values():
             curve.setData([], [])
+        if self._curve_current is not None:
+            self._curve_current.setData([], [])
+        if self._curve_voltage is not None:
+            self._curve_voltage.setData([], [])
 
 
 # ── CompareDialog ───────────────────────────────────────────────────────────────
@@ -501,7 +568,7 @@ class MotorMonitorWindow(QMainWindow):
                 current_name = None
                 for line in result.stdout.split("\n"):
                     line = line.strip()
-                    if line.endswith(":") and "adapter" in line.lower():
+                    if line.endswith(":") and ("adapter" in line.lower() or "adaptador" in line.lower()):
                         current_name = line.replace(":", "").strip()
                         for prefix in [
                             "Ethernet adapter ", "Wireless LAN adapter ",

@@ -12,13 +12,28 @@ if not exist env310\Scripts\activate.bat (
     echo   py -3.10 -m venv env310
     echo   env310\Scripts\pip install PyQt6 pyqtgraph openpyxl pyinstaller
     echo   env310\Scripts\pip install --only-binary=:all: cyclonedds==0.10.2
-    echo   env310\Scripts\pip install -e unitree_sdk2_python --no-deps
+    echo   env310\Scripts\pip install unitree_sdk2_python --no-deps
     pause
     exit /b 1
 )
 
 call env310\Scripts\activate.bat
 echo [OK] Entorno env310 activado (Python 3.10 + cyclonedds 0.10.2)
+echo.
+
+REM -------------------------------------------------------
+REM  Reinstalar unitree_sdk2py de forma NO editable
+REM  (el modo -e no es compatible con PyInstaller)
+REM -------------------------------------------------------
+echo [0/2] Reinstalando unitree_sdk2py (modo no-editable para PyInstaller)...
+pip uninstall unitree_sdk2py -y >nul 2>&1
+pip install "%~dp0unitree_sdk2_python" --no-deps --quiet
+if %errorlevel% neq 0 (
+    echo [ERROR] No se pudo instalar unitree_sdk2py.
+    pause
+    exit /b 1
+)
+echo [OK] unitree_sdk2py instalado correctamente.
 echo.
 
 REM Limpiar build anterior
@@ -62,7 +77,7 @@ if exist dist\UnitreeMotorMonitor.exe (
     echo   real necesita configurar IP estatica en Ethernet:
     echo     IP:      192.168.123.100
     echo     Mascara: 255.255.255.0
-    echo   (requiere ejecutar como administrador una vez)
+    echo   (usa conectar_robot.bat - configura todo solo)
     echo ============================================
 ) else (
     echo [ERROR] No se encontro el .exe en dist\

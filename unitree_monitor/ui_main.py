@@ -74,10 +74,14 @@ class GraphPanel(QWidget):
         self._motor_info   = {}   # idx -> {name, group}
         self._angle_curves = {}   # idx -> PlotDataItem
         self._temp_curves  = {}   # idx -> PlotDataItem
-        self._power_a_buf  = deque(maxlen=self.HISTORY)
-        self._power_v_buf  = deque(maxlen=self.HISTORY)
+        self._power_a_buf   = deque(maxlen=self.HISTORY)
+        self._power_v_buf   = deque(maxlen=self.HISTORY)
+        self._bms_soc_buf   = deque(maxlen=self.HISTORY)
+        self._cell_vol_bufs = {}   # cell_idx -> deque
         self._curve_current = None
         self._curve_voltage = None
+        self._curve_soc     = None
+        self._cell_curves   = {}   # cell_idx -> PlotDataItem
         self._build_ui()
 
     def _build_ui(self):
@@ -126,6 +130,20 @@ class GraphPanel(QWidget):
         self.plot_voltage.showGrid(x=True, y=True, alpha=0.3)
         grid.addWidget(self.plot_voltage, 1, 1)
 
+        # Fila 2 — Batería: SOC | Tensión de celdas
+        self.plot_soc = pg.PlotWidget(title="Carga de batería (%)")
+        self.plot_soc.setLabel("left",   "SOC",    units="%")
+        self.plot_soc.setLabel("bottom", "Tiempo", units="s")
+        self.plot_soc.setYRange(0, 100)
+        self.plot_soc.showGrid(x=True, y=True, alpha=0.3)
+        grid.addWidget(self.plot_soc, 2, 0)
+
+        self.plot_cells = pg.PlotWidget(title="Tensión de celdas (mV) — balance de batería")
+        self.plot_cells.setLabel("left",   "Tensión", units="mV")
+        self.plot_cells.setLabel("bottom", "Tiempo",  units="s")
+        self.plot_cells.showGrid(x=True, y=True, alpha=0.3)
+        grid.addWidget(self.plot_cells, 2, 1)
+
         layout.addLayout(grid)
 
     def setup_motors(self, robot_type: str):
@@ -141,6 +159,9 @@ class GraphPanel(QWidget):
         self._temp_curves.clear()
         self._power_a_buf.clear()
         self._power_v_buf.clear()
+        self._bms_soc_buf.clear()
+        self._cell_vol_bufs.clear()
+        self._cell_curves.clear()
 
         groups = []
         for idx in range(num):
@@ -193,6 +214,33 @@ class GraphPanel(QWidget):
                                  style=Qt.PenStyle.DashLine)
         )
 
+        # SOC
+        self.plot_soc.clear()
+        self._curve_soc = self.plot_soc.plot(
+            pen=pg.mkPen("#43a047", width=2), name="SOC (%)"
+        )
+        self.plot_soc.addLine(
+            y=20, pen=pg.mkPen(color=(200, 0, 0), width=1,
+                               style=Qt.PenStyle.DashLine)
+        )
+
+        # Celdas — inicializamos con 6 celdas (ampliamos dinámicamente al recibir datos)
+        _cell_colors = ["#e53935", "#1e88e5", "#43a047",
+                        "#fb8c00", "#8e24aa", "#00acc1"]
+        self.plot_cells.clear()
+        legend_c = self.plot_cells.addLegend(offset=(10, 10))
+        self.plot_cells.addLine(
+            y=3500, pen=pg.mkPen(color=(150, 150, 150), width=1,
+                                 style=Qt.PenStyle.DashLine)
+        )
+        for i in range(6):
+            self._cell_vol_bufs[i] = deque(maxlen=self.HISTORY)
+            curve = self.plot_cells.plot(
+                pen=pg.mkPen(_cell_colors[i % len(_cell_colors)], width=2),
+                name=f"Celda {i + 1}",
+            )
+            self._cell_curves[i] = curve
+
         # Ángulo: combo de grupos
         self.combo_group.blockSignals(True)
         self.combo_group.clear()
@@ -240,6 +288,13 @@ class GraphPanel(QWidget):
         self._power_a_buf.append(packet["power_a"])
         self._power_v_buf.append(packet["power_v"])
 
+        bms = packet.get("bms", {})
+        self._bms_soc_buf.append(bms.get("soc", 0))
+        for i, mv in enumerate(bms.get("cell_vol", [])):
+            if i not in self._cell_vol_bufs:
+                self._cell_vol_bufs[i] = deque(maxlen=self.HISTORY)
+            self._cell_vol_bufs[i].append(mv)
+
         t_arr = list(self._times)
 
         for idx, curve in self._angle_curves.items():
@@ -266,6 +321,19 @@ class GraphPanel(QWidget):
             if n > 0:
                 self._curve_voltage.setData(t_arr[-n:], data_v[-n:])
 
+        if self._curve_soc is not None:
+            data_soc = list(self._bms_soc_buf)
+            n = min(len(t_arr), len(data_soc))
+            if n > 0:
+                self._curve_soc.setData(t_arr[-n:], data_soc[-n:])
+
+        for i, curve in self._cell_curves.items():
+            if i in self._cell_vol_bufs:
+                data_c = list(self._cell_vol_bufs[i])
+                n = min(len(t_arr), len(data_c))
+                if n > 0:
+                    curve.setData(t_arr[-n:], data_c[-n:])
+
     def clear(self):
         self._time_start = None
         self._times.clear()
@@ -282,6 +350,13 @@ class GraphPanel(QWidget):
             self._curve_current.setData([], [])
         if self._curve_voltage is not None:
             self._curve_voltage.setData([], [])
+        if self._curve_soc is not None:
+            self._curve_soc.setData([], [])
+        self._bms_soc_buf.clear()
+        for buf in self._cell_vol_bufs.values():
+            buf.clear()
+        for curve in self._cell_curves.values():
+            curve.setData([], [])
 
 
 # ── CompareDialog ───────────────────────────────────────────────────────────────

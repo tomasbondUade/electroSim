@@ -5,3 +5,4 @@ build/
 dist/
 *.spec
 *.csv
+unitree_sdk2_python/

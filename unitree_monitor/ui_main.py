@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox, QFileDialog, QGroupBox, QStatusBar,
     QGridLayout, QTabWidget, QDialog, QDialogButtonBox,
+    QCheckBox, QScrollArea, QFrame, QSizePolicy,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
@@ -62,18 +63,36 @@ def _joint_tooltip(motor_name: str) -> str:
 # ── GraphPanel ─────────────────────────────────────────────────────────────────
 
 class GraphPanel(QWidget):
-    """Gráficos en tiempo real: ángulos, temperatura, corriente y tensión del sistema."""
+    """Gráficos en tiempo real con selector lateral de gráficos visibles."""
 
     HISTORY = 300  # muestras (30 s a 10 Hz)
 
+    # Orden y etiquetas de los gráficos disponibles
+    _GRAPH_KEYS = [
+        "angle",
+        "temp",
+        "current",
+        "voltage",
+        "soc",
+        "cells",
+    ]
+    _GRAPH_LABELS = {
+        "angle":   "Ángulo por motor",
+        "temp":    "Temperatura motores",
+        "current": "Corriente sistema",
+        "voltage": "Tensión sistema",
+        "soc":     "Carga batería (SOC)",
+        "cells":   "Tensión de celdas",
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._time_start   = None
-        self._times        = deque(maxlen=self.HISTORY)
-        self._motor_data   = {}   # idx -> {"q_deg": deque, "temperature": deque}
-        self._motor_info   = {}   # idx -> {name, group}
-        self._angle_curves = {}   # idx -> PlotDataItem
-        self._temp_curves  = {}   # idx -> PlotDataItem
+        self._time_start    = None
+        self._times         = deque(maxlen=self.HISTORY)
+        self._motor_data    = {}   # idx -> {"q_deg": deque, "temperature": deque}
+        self._motor_info    = {}   # idx -> {name, group}
+        self._angle_curves  = {}   # idx -> PlotDataItem
+        self._temp_curves   = {}   # idx -> PlotDataItem
         self._power_a_buf   = deque(maxlen=self.HISTORY)
         self._power_v_buf   = deque(maxlen=self.HISTORY)
         self._bms_soc_buf   = deque(maxlen=self.HISTORY)
@@ -82,74 +101,146 @@ class GraphPanel(QWidget):
         self._curve_voltage = None
         self._curve_soc     = None
         self._cell_curves   = {}   # cell_idx -> PlotDataItem
+
+        # checkboxes dict: key -> QCheckBox
+        self._checkboxes: dict[str, QCheckBox] = {}
+
         self._build_ui()
 
+    # ── Construcción de la UI ──────────────────────────────────────────────────
+
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
 
-        ctrl = QHBoxLayout()
-        ctrl.addWidget(QLabel("Grupo (ángulos):"))
+        # ── Sidebar izquierdo ──────────────────────────────────────────────────
+        sidebar = QWidget()
+        sidebar.setFixedWidth(190)
+        sidebar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        sb_layout = QVBoxLayout(sidebar)
+        sb_layout.setContentsMargins(4, 4, 4, 4)
+        sb_layout.setSpacing(6)
+
+        lbl_title = QLabel("<b>Gráficos visibles</b>")
+        sb_layout.addWidget(lbl_title)
+
+        for key in self._GRAPH_KEYS:
+            cb = QCheckBox(self._GRAPH_LABELS[key])
+            cb.setChecked(True)
+            cb.stateChanged.connect(self._relayout_plots)
+            self._checkboxes[key] = cb
+            sb_layout.addWidget(cb)
+
+        # Separador
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        sb_layout.addWidget(sep)
+
+        # Selector de grupo para ángulos
+        sb_layout.addWidget(QLabel("<b>Grupo (ángulos)</b>"))
         self.combo_group = QComboBox()
-        self.combo_group.setMinimumWidth(200)
+        self.combo_group.setMaximumWidth(180)
         self.combo_group.currentTextChanged.connect(self._on_group_changed)
-        ctrl.addWidget(self.combo_group)
-        ctrl.addStretch()
-        layout.addLayout(ctrl)
+        sb_layout.addWidget(self.combo_group)
 
-        grid = QGridLayout()
-        grid.setSpacing(6)
+        sb_layout.addStretch()
+        root.addWidget(sidebar)
 
-        # Fila 0 — Ángulos | Temperatura
+        # ── Área derecha: scroll + grilla dinámica ────────────────────────────
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        self._grid_container = QWidget()
+        self._grid = QGridLayout(self._grid_container)
+        self._grid.setSpacing(6)
+        self._scroll.setWidget(self._grid_container)
+
+        root.addWidget(self._scroll, stretch=1)
+
+        # ── Crear los seis PlotWidgets ─────────────────────────────────────────
         self.plot_angle = pg.PlotWidget(title="Ángulo por motor (°)")
-        self.plot_angle.setLabel("left",   "Ángulo",     units="°")
-        self.plot_angle.setLabel("bottom", "Tiempo",     units="s")
+        self.plot_angle.setLabel("left",   "Ángulo",      units="°")
+        self.plot_angle.setLabel("bottom", "Tiempo",      units="s")
         self.plot_angle.showGrid(x=True, y=True, alpha=0.3)
-        grid.addWidget(self.plot_angle, 0, 0)
 
         self.plot_temp = pg.PlotWidget(title="Temperatura — todos los motores (°C)")
-        self.plot_temp.setLabel("left",   "Temperatura", units="°C")
-        self.plot_temp.setLabel("bottom", "Tiempo",      units="s")
+        self.plot_temp.setLabel("left",   "Temperatura",  units="°C")
+        self.plot_temp.setLabel("bottom", "Tiempo",       units="s")
         self.plot_temp.showGrid(x=True, y=True, alpha=0.3)
-        grid.addWidget(self.plot_temp, 0, 1)
 
-        # Fila 1 — Corriente | Tensión
         self.plot_current = pg.PlotWidget(
             title="Corriente del sistema (A) — picos = esfuerzo mecánico"
         )
         self.plot_current.setLabel("left",   "Corriente", units="A")
         self.plot_current.setLabel("bottom", "Tiempo",    units="s")
         self.plot_current.showGrid(x=True, y=True, alpha=0.3)
-        grid.addWidget(self.plot_current, 1, 0)
 
         self.plot_voltage = pg.PlotWidget(
             title="Tensión del sistema (V) — caídas = alta demanda"
         )
-        self.plot_voltage.setLabel("left",   "Tensión",  units="V")
-        self.plot_voltage.setLabel("bottom", "Tiempo",   units="s")
+        self.plot_voltage.setLabel("left",   "Tensión",   units="V")
+        self.plot_voltage.setLabel("bottom", "Tiempo",    units="s")
         self.plot_voltage.showGrid(x=True, y=True, alpha=0.3)
-        grid.addWidget(self.plot_voltage, 1, 1)
 
-        # Fila 2 — Batería: SOC | Tensión de celdas
         self.plot_soc = pg.PlotWidget(title="Carga de batería (%)")
         self.plot_soc.setLabel("left",   "SOC",    units="%")
         self.plot_soc.setLabel("bottom", "Tiempo", units="s")
         self.plot_soc.setYRange(0, 100)
         self.plot_soc.showGrid(x=True, y=True, alpha=0.3)
-        grid.addWidget(self.plot_soc, 2, 0)
 
         self.plot_cells = pg.PlotWidget(title="Tensión de celdas (mV) — balance de batería")
         self.plot_cells.setLabel("left",   "Tensión", units="mV")
         self.plot_cells.setLabel("bottom", "Tiempo",  units="s")
         self.plot_cells.showGrid(x=True, y=True, alpha=0.3)
-        grid.addWidget(self.plot_cells, 2, 1)
 
-        layout.addLayout(grid)
+        self._plot_widgets = {
+            "angle":   self.plot_angle,
+            "temp":    self.plot_temp,
+            "current": self.plot_current,
+            "voltage": self.plot_voltage,
+            "soc":     self.plot_soc,
+            "cells":   self.plot_cells,
+        }
+
+        # Altura mínima por gráfico
+        for pw in self._plot_widgets.values():
+            pw.setMinimumHeight(220)
+
+        # Colocar los gráficos por primera vez
+        self._relayout_plots()
+
+    # ── Relayout dinámico ─────────────────────────────────────────────────────
+
+    def _relayout_plots(self):
+        """Quita todos los widgets del grid y vuelve a colocar solo los visibles."""
+        # Sacar todos del grid sin destruirlos
+        for key, pw in self._plot_widgets.items():
+            pw.setParent(None)
+
+        visible_keys = [k for k in self._GRAPH_KEYS if self._checkboxes[k].isChecked()]
+
+        COLS = 2
+        for pos, key in enumerate(visible_keys):
+            row = pos // COLS
+            col = pos % COLS
+            self._grid.addWidget(self._plot_widgets[key], row, col)
+            self._plot_widgets[key].show()
+
+        # Si el número de visibles es impar, hacemos que el último ocupe 2 columnas
+        if len(visible_keys) % 2 == 1 and visible_keys:
+            last_key = visible_keys[-1]
+            last_row = (len(visible_keys) - 1) // COLS
+            self._grid.addWidget(self._plot_widgets[last_key], last_row, 0, 1, 2)
+
+    # ── Inicialización de curvas por robot ────────────────────────────────────
 
     def setup_motors(self, robot_type: str):
         """Inicializa buffers y curvas para el robot conectado."""
-        joint_map  = get_joint_map(robot_type)
-        num        = get_num_motors(robot_type)
+        joint_map = get_joint_map(robot_type)
+        num       = get_num_motors(robot_type)
 
         self._motor_info.clear()
         self._motor_data.clear()
@@ -174,7 +265,7 @@ class GraphPanel(QWidget):
                 "temperature": deque(maxlen=self.HISTORY),
             }
 
-        # Temperatura: una curva por motor con leyenda
+        # Temperatura: una curva por motor
         self.plot_temp.clear()
         self.plot_temp.addLine(
             y=40, pen=pg.mkPen(color=(200, 150, 0), width=1,
@@ -184,7 +275,7 @@ class GraphPanel(QWidget):
             y=60, pen=pg.mkPen(color=(200, 0, 0), width=1,
                                style=Qt.PenStyle.DashLine),
         )
-        legend_t = self.plot_temp.addLegend(offset=(10, 10))
+        self.plot_temp.addLegend(offset=(10, 10))
         for idx in range(num):
             color = _MOTOR_COLORS[idx % len(_MOTOR_COLORS)]
             curve = self.plot_temp.plot(
@@ -193,22 +284,21 @@ class GraphPanel(QWidget):
             )
             self._temp_curves[idx] = curve
 
-        # Corriente y tensión del sistema
+        # Corriente
         self.plot_current.clear()
         self._curve_current = self.plot_current.plot(
             pen=pg.mkPen("#1e88e5", width=2), name="Corriente (A)"
         )
-        # Línea de referencia: consumo en reposo ~1.5 A
         self.plot_current.addLine(
             y=1.5, pen=pg.mkPen(color=(150, 150, 150), width=1,
                                 style=Qt.PenStyle.DashLine)
         )
 
+        # Tensión
         self.plot_voltage.clear()
         self._curve_voltage = self.plot_voltage.plot(
             pen=pg.mkPen("#e53935", width=2), name="Tensión (V)"
         )
-        # Línea de referencia: tensión nominal Go2 ~27.5 V
         self.plot_voltage.addLine(
             y=27.5, pen=pg.mkPen(color=(150, 150, 150), width=1,
                                  style=Qt.PenStyle.DashLine)
@@ -224,11 +314,11 @@ class GraphPanel(QWidget):
                                style=Qt.PenStyle.DashLine)
         )
 
-        # Celdas — inicializamos con 6 celdas (ampliamos dinámicamente al recibir datos)
+        # Celdas
         _cell_colors = ["#e53935", "#1e88e5", "#43a047",
                         "#fb8c00", "#8e24aa", "#00acc1"]
         self.plot_cells.clear()
-        legend_c = self.plot_cells.addLegend(offset=(10, 10))
+        self.plot_cells.addLegend(offset=(10, 10))
         self.plot_cells.addLine(
             y=3500, pen=pg.mkPen(color=(150, 150, 150), width=1,
                                  style=Qt.PenStyle.DashLine)
@@ -249,12 +339,14 @@ class GraphPanel(QWidget):
         if groups:
             self._on_group_changed(groups[0])
 
+    # ── Cambio de grupo en ángulos ────────────────────────────────────────────
+
     def _on_group_changed(self, group_name: str):
         self.plot_angle.clear()
         self._angle_curves.clear()
 
         colors = ["#e53935", "#1e88e5", "#43a047", "#fb8c00", "#8e24aa", "#00acc1"]
-        legend_a = self.plot_angle.addLegend(offset=(10, 10))
+        self.plot_angle.addLegend(offset=(10, 10))
         i = 0
         for idx, info in self._motor_info.items():
             if info["group"] == group_name:
@@ -265,13 +357,14 @@ class GraphPanel(QWidget):
                 self._angle_curves[idx] = curve
                 i += 1
 
-        # Redibuja datos existentes en el nuevo grupo
         t_arr = list(self._times)
         for idx, curve in self._angle_curves.items():
             data = list(self._motor_data[idx]["q_deg"])
             n = min(len(t_arr), len(data))
             if n > 0:
                 curve.setData(t_arr[-n:], data[-n:])
+
+    # ── Actualización de datos ────────────────────────────────────────────────
 
     def update_data(self, packet: dict):
         if self._time_start is None:
@@ -334,11 +427,14 @@ class GraphPanel(QWidget):
                 if n > 0:
                     curve.setData(t_arr[-n:], data_c[-n:])
 
+    # ── Limpiar ───────────────────────────────────────────────────────────────
+
     def clear(self):
         self._time_start = None
         self._times.clear()
         self._power_a_buf.clear()
         self._power_v_buf.clear()
+        self._bms_soc_buf.clear()
         for buf in self._motor_data.values():
             buf["q_deg"].clear()
             buf["temperature"].clear()
@@ -352,7 +448,6 @@ class GraphPanel(QWidget):
             self._curve_voltage.setData([], [])
         if self._curve_soc is not None:
             self._curve_soc.setData([], [])
-        self._bms_soc_buf.clear()
         for buf in self._cell_vol_bufs.values():
             buf.clear()
         for curve in self._cell_curves.values():

@@ -121,9 +121,20 @@ echo.
 echo  ============================================
 echo   Listo! Selecciona Go2 y hace click en
 echo   Conectar para ver los datos del robot.
+echo.
+echo   Esta ventana se puede minimizar.
+echo   Cuando cierres la app, la IP vuelve
+echo   a ser automatica (DHCP).
 echo  ============================================
 echo.
 
-start "" "!APP!"
-timeout /t 3 >nul
+start /wait "" "!APP!"
+
+REM La app se cerro - restaurar DHCP
+echo  Restaurando IP automatica (DHCP)...
+powershell -NoProfile -Command "Remove-NetIPAddress -InterfaceAlias '!ADAPTER!' -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue" >nul 2>&1
+powershell -NoProfile -Command "Remove-NetRoute -InterfaceAlias '!ADAPTER!' -DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue" >nul 2>&1
+powershell -NoProfile -Command "Set-NetIPInterface -InterfaceAlias '!ADAPTER!' -Dhcp Enabled -ErrorAction SilentlyContinue" >nul 2>&1
+echo  [OK] IP restaurada a DHCP.
+timeout /t 2 >nul
 exit /b 0
